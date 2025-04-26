@@ -1,0 +1,167 @@
+#content-based
+
+def get_recommendations(user_type=None, user_release_year=None, user_genres=None, user_countries=None, n=10):
+    # Create a copy of the test data to work with
+    filtered_data = test.copy()
+    
+    # Apply type filter
+    if user_type:
+        user_type = user_type.strip().lower()
+        filtered_data = filtered_data[
+            filtered_data['type'].str.lower().str.strip() == user_type
+        ]
+    
+    # Apply release year filter with range
+    if user_release_year:
+        try:
+            user_release_year = int(user_release_year)
+            filtered_data = filtered_data[
+                (filtered_data['release_year'] >= user_release_year - 2) & 
+                (filtered_data['release_year'] <= user_release_year + 2)
+            ].dropna(subset=['release_year'])
+        except ValueError:
+            print("Invalid year entered. Ignoring year filter.")
+    
+    # Apply genres filter
+    if user_genres:
+        genre_list = [g.strip().lower() for g in user_genres.split(',')]
+        filtered_data = filtered_data[filtered_data['genres'].apply(
+            lambda x: any(g in [g.lower() for g in literal_eval(x)] for g in genre_list) 
+            if isinstance(x, str) else False
+        )]
+    
+    # Apply countries filter
+    if user_countries:
+        country_list = [c.strip().lower() for c in user_countries.split(',')]
+        filtered_data = filtered_data[filtered_data['production_countries'].apply(
+            lambda x: any(c in str(x).lower() for c in country_list)
+        )]
+
+    if filtered_data.empty:
+        return "No matching movies found based on your criteria!"
+
+    filtered_data = filtered_data.drop_duplicates(subset='title')
+
+    # debugging
+    print(f"\nAfter filtering, {len(filtered_data)} movies match your criteria")
+    print("Sample filtered movies:")
+    print(filtered_data[['title', 'type', 'release_year', 'genres']].head().to_string(index=False))
+    
+    similar_movies = pd.Series(dtype='float64')
+    
+    # Get similarity scores only for filtered items
+    if 'similarity_df_test' in globals():
+        # Get indices of filtered items that exist in similarity matrix
+        valid_indices = [idx for idx in filtered_data.index if idx in similarity_df_test.index]
+        
+        if not valid_indices:
+            return "No similar movies found in the dataset!"
+        
+        # Get average similarity scores across all filtered items
+        similar_movies = similarity_df_test.loc[valid_indices].mean(axis=0)
+        
+        # Remove the filtered items themselves from recommendations
+        similar_movies = similar_movies.drop(valid_indices, errors='ignore')
+        
+        # Sort by similarity
+        similar_movies = similar_movies.sort_values(ascending=False)
+        
+        # Get top similar movies that also match original filters
+        recommended_indices = similar_movies.index[:n]
+        recommended_movies = test.loc[recommended_indices, ['title', 'genres', 'rating', 'description', 'release_year', 'type', 'production_countries']]
+        
+        # Apply the same filters to recommendations
+        if user_type:
+            recommended_movies = recommended_movies[
+                recommended_movies['type'].str.lower().str.strip() == user_type
+            ]
+        
+        if user_release_year:
+            recommended_movies = recommended_movies[
+                (recommended_movies['release_year'] >= user_release_year - 2) & 
+                (recommended_movies['release_year'] <= user_release_year + 2)
+            ].dropna(subset=['release_year'])
+        
+        if user_genres:
+            recommended_movies = recommended_movies[recommended_movies['genres'].apply(
+                lambda x: any(g in [g.lower() for g in literal_eval(x)] for g in genre_list) 
+                if isinstance(x, str) else False
+            )]
+        
+        if user_countries:
+            recommended_movies = recommended_movies[recommended_movies['production_countries'].apply(
+                lambda x: any(c in str(x).lower() for c in country_list)
+            )]
+        
+        # If we don't have enough recommendations, add highest rated from filtered set
+        if len(recommended_movies) < n:
+            additional = filtered_data[['title', 'genres', 'rating', 'description', 'release_year', 'production_countries']] \
+                        .sort_values('rating', ascending=False) \
+                        .head(n - len(recommended_movies))
+            recommended_movies = pd.concat([recommended_movies, additional])
+    
+    else:
+        # Fallback to highest rated from filtered set
+        recommended_movies = filtered_data[['title', 'genres', 'rating', 'description', 'release_year', 'production_countries']] \
+                           .sort_values('rating', ascending=False) \
+                           .head(n)
+
+    return recommended_movies.drop_duplicates().head(n)
+
+# User Input
+user_type = input("Enter movie type (Movie/Show) or press Enter to skip: ").strip() or None
+user_release_year = input("Enter release year or press Enter to skip (+- 2years): ").strip()
+user_release_year = int(user_release_year) if user_release_year else None
+user_genres = input("Enter genres or press Enter to skip (split by ','): ").strip() or None
+user_countries = input("Enter production countries or press Enter to skip: ").strip() or None
+
+recommended_movies = get_recommendations(user_type, user_release_year, user_genres, user_countries, n=10)
+
+print("\nTop 10 recommended Movies for you:")
+if isinstance(recommended_movies, str):
+    print(recommended_movies)
+else:
+    for _, row in recommended_movies.iterrows():
+        print(f"""
+        Movie Title: {row['title']}
+        Release Year: {row['release_year']}
+        Genres: {row['genres']}
+        Rating: {row.get('rating', 'N/A')}
+        Description: {row['description']}
+        """)
+
+
+
+def evaluate_recommendations(y_true, y_pred):
+    threshold = 3
+    y_true_bin = [1 if rating >= threshold else 0 for rating in y_true]
+    y_pred_bin = [1 if rating >= threshold else 0 for rating in y_pred]
+
+    precision = precision_score(y_true_bin, y_pred_bin, zero_division=1)
+    recall = recall_score(y_true_bin, y_pred_bin, zero_division=1)
+    f1 = f1_score(y_true_bin, y_pred_bin, zero_division=1)  # Changed variable name
+    rmse = np.sqrt(mean_squared_error(y_true, y_pred))
+    
+    return {"RMSE": rmse, "Precision": precision, "F1": f1, "Recall": recall}  # Changed key name
+
+if isinstance(recommended_movies, str):
+    print("No recommendations to evaluate.")
+else:
+    # Get user's actual ratings from training set for recommended movies
+    y_true = []
+    y_pred = []
+    
+    for _, row in recommended_movies.iterrows():
+        # Check if user rated this movie in training data
+        user_ratings = train[(train['title'] == row['title'])]
+        if not user_ratings.empty:
+            y_true.extend(user_ratings['rating'].tolist())
+            y_pred.extend([row['rating']] * len(user_ratings))
+    
+    if y_true:
+        eval_metrics = evaluate_recommendations(y_true, y_pred)
+        print("\nEvaluation Metrics:")
+        for metric, value in sorted(eval_metrics.items(), key=lambda x: x[1], reverse=True):
+            print(f"{metric}: {value:.4f}")
+    else:
+        print("\nInsufficient data for evaluation - no overlapping user ratings found")
