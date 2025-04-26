@@ -153,7 +153,7 @@ else:
     
     for _, row in recommended_movies.iterrows():
         # Check if user rated this movie in training data
-        user_ratings = train[(train['title'] == row['title'])]
+        user_ratings = test[(test['title'] == row['title'])]
         if not user_ratings.empty:
             y_true.extend(user_ratings['rating'].tolist())
             y_pred.extend([row['rating']] * len(user_ratings))
