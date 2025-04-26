@@ -1,0 +1,249 @@
+# weight-hybrid 
+
+import pandas as pd
+import numpy as np
+from ast import literal_eval
+from surprise import SVD, Dataset, Reader, accuracy
+from surprise.model_selection import train_test_split
+from collections import defaultdict
+from joblib import dump
+
+# loaded final_data dataset
+if 'final_data' not in globals():
+    raise ValueError("Error: 'final_data' dataset is not defined.")
+
+# Content-Based Components 
+content_based_components = {
+    'tfidf_vectorizer': tfidf, 
+    'similarity_matrix': similarity_df_train
+}
+
+# Prepare data for Surprise
+reader = Reader(rating_scale=(1, 5))
+dataset = Dataset.load_from_df(final_data[['user_id', 'id', 'rating']], reader)
+
+# Train-Test Split (80-20)
+trainset, testset = train_test_split(dataset, test_size=0.2)
+
+# Train the best collaborative filtering model (SVD)
+best_svd = SVD(n_factors=100, lr_all=0.005, reg_all=0.1)
+best_svd.fit(trainset)
+
+# Content-Based Filtering: Precompute Similarities
+content_features = final_data[['id', 'title', 'genres', 'production_countries', 
+                             'release_year', 'description', 'type']].copy()
+content_features['genres'] = content_features['genres'].apply(lambda x: literal_eval(x) if isinstance(x, str) else [])
+content_features['production_countries'] = content_features['production_countries'].apply(lambda x: literal_eval(x) if isinstance(x, str) else [])
+
+def compute_content_similarity(movie_id, user_genres, user_countries, weights=(0.5, 0.5)):
+    """Normalized similarity computation"""
+    if movie_id not in content_features['id'].values:
+        return 0
+    
+    movie_row = content_features[content_features['id'] == movie_id].iloc[0]
+    
+    # Normalized genre similarity (0-1)
+    genre_sim = (len(set(movie_row['genres']) & set(user_genres)) / 
+                len(set(user_genres))) if user_genres else 0
+    
+    # Normalized country similarity (0-1)
+    country_sim = (len(set(movie_row['production_countries']) & set(user_countries)) / 
+                  len(set(user_countries))) if user_countries else 0
+    
+    # Scale to match CF rating range (1-5)
+    return (weights[0] * genre_sim + weights[1] * country_sim) * 4 + 1  # Scales 0-1 to 1-5
+
+def hybrid_recommend_for_user(user_id, n_recommendations=10, weight_cf=0.5, weight_cbf=0.5,
+                            genre_filter=None, year_filter=None, type_filter=None,
+                            country_filter=None, sim_weights=(0.5, 0.5)):
+    """
+    Hybrid recommendation with preserved structure but enhanced filtering
+    """
+    # Check if user exists
+    if user_id not in final_data['user_id'].values and user_id != -1:
+        print("User not found in dataset. Recommending top movies instead.")
+        user_id = -1  # Treat as new user
+    
+    # Get user preferences (only for existing users)
+    user_genres, user_countries = [], []
+    if user_id != -1:
+        user_movies = final_data[final_data['user_id'] == user_id]
+        user_genres = list(set(g for genres in user_movies['genres'].apply(literal_eval) for g in genres))
+        user_countries = list(set(c for countries in user_movies['production_countries'].apply(literal_eval) for c in countries))
+    
+    # Apply filters
+    mask = pd.Series(True, index=final_data.index)
+    
+    if type_filter:
+        mask &= (final_data['type'].str.lower() == type_filter.lower())
+    
+    if year_filter and isinstance(year_filter, list):
+        if len(year_filter) != 2 or year_filter[0] > year_filter[1]:
+            raise ValueError("Year range must be in format YYYY-YYYY")
+    
+    if genre_filter:
+        if isinstance(genre_filter, str):
+            genre_filter = [genre_filter]
+        mask &= final_data['genres'].apply(
+            lambda x: any(g.lower() in [gs.lower() for gs in literal_eval(x)] for g in genre_filter))
+    
+    if country_filter:
+        if isinstance(country_filter, str):
+            country_filter = [country_filter]
+        mask &= final_data['production_countries'].apply(
+            lambda x: any(c.lower() in [cs.lower() for cs in literal_eval(x)] for c in country_filter))
+    
+    all_items = final_data[mask]['id'].unique()
+    
+    # Generate recommendations
+    predictions = []
+    for item_id in all_items:
+        try:
+            # CF score (1-5 scale)
+            cf_score = best_svd.predict(user_id, item_id).est
+            
+            # CBF score now on same 1-5 scale
+            cbf_score = compute_content_similarity(item_id, user_genres, user_countries, sim_weights)
+            
+            # Hybrid score with balanced weights
+            hybrid_score = (weight_cf * cf_score) + (weight_cbf * cbf_score)
+            
+            # Get movie details
+            movie_data = final_data[final_data['id'] == item_id].iloc[0]
+            
+            predictions.append({
+                'id': item_id,
+                'title': movie_data['title'],
+                'release_year': movie_data['release_year'],
+                'genres': literal_eval(movie_data['genres']),
+                'countries': literal_eval(movie_data['production_countries']),
+                'description': movie_data['description'],
+                'type': movie_data['type'],
+                'hybrid_score': hybrid_score,
+                'cf_score': cf_score,
+                'cbf_score': cbf_score
+            })
+        except Exception as e:
+            continue
+    
+    # Sort and return top recommendations
+    predictions.sort(key=lambda x: x['hybrid_score'], reverse=True)
+    return predictions[:n_recommendations]
+
+def get_user_input():
+    """Your preferred input handling function"""
+    print("\n=== Movie Recommendation System ===")
+    
+    # User ID
+    while True:
+        user_id = input("Enter your user ID (or 'new' for new user): ").strip()
+        if user_id.lower() == 'new':
+            user_id = -1  # Special ID for new users
+            break
+        try:
+            user_id = int(user_id)
+            break
+        except ValueError:
+            print("Please enter a valid user ID or 'new'")
+    
+    # Movie type
+    movie_type = input("Enter movie type (Movie/Show) or press Enter to skip: ").strip()
+    movie_type = movie_type if movie_type else None
+    
+    # Release year
+    release_year = input("Enter release year or range (e.g., 2018 or 2018-2020) or press Enter to skip: ").strip()
+    if release_year:
+        if '-' in release_year:
+            release_year = [int(y) for y in release_year.split('-')]
+        else:
+            release_year = int(release_year)
+    else:
+        release_year = None
+    
+    # Genres
+    genres = input("Enter genres (comma separated) or press Enter to skip: ").strip()
+    genres = [g.strip() for g in genres.split(',')] if genres else None
+    
+    # Countries
+    countries = input("Enter production countries (comma separated) or press Enter to skip: ").strip()
+    countries = [c.strip() for c in countries.split(',')] if countries else None
+    
+    return {
+        'user_id': user_id,
+        'movie_type': movie_type,
+        'release_year': release_year,
+        'genres': genres,
+        'countries': countries
+    }
+
+# Main execution
+if __name__ == "__main__":
+    # Get user input
+    user_input = get_user_input()
+    
+    # Generate recommendations
+    recommendations = hybrid_recommend_for_user(
+        user_id=user_input['user_id'],
+        genre_filter=user_input['genres'],
+        year_filter=user_input['release_year'],
+        type_filter=user_input['movie_type'],
+        country_filter=user_input['countries'],
+        n_recommendations=10,
+        weight_cf=0.6,
+        weight_cbf=0.4,
+        sim_weights=(0.7, 0.3)  # Genre weight 0.7, Country weight 0.3
+    )
+    
+    # Display results
+    print("\n=== Top 10 Recommended Movies ===")
+    for i, movie in enumerate(recommendations, 1):
+        print(f"""
+        {i}. {movie['title']} ({movie['release_year']}) [{movie['type']}]
+        Genres: {', '.join(movie['genres'])}
+        Countries: {', '.join(movie['countries'])}
+        Hybrid Score: {movie['hybrid_score']:.2f} (CF: {movie['cf_score']:.2f}, CBF: {movie['cbf_score']:.2f})
+        Description: {movie['description'][:150]}...""")
+    
+    # Evaluation
+    test_predictions = best_svd.test(testset)
+    rmse = accuracy.rmse(test_predictions, verbose=False)
+    mae = accuracy.mae(test_predictions, verbose=False)
+    
+    # Precision, Recall, F1 calculation (from your original)
+    threshold = 3.5
+    k = 10103
+    user_est_true = defaultdict(list)
+    for uid, _, true_r, est, _ in test_predictions:
+        user_est_true[uid].append((est, true_r))
+    
+    precision_list, recall_list = [], []
+    for uid, ratings in user_est_true.items():
+        ratings.sort(key=lambda x: x[0], reverse=True)
+        top_k = ratings[:k]
+        relevant = sum((true_r >= threshold) for (_, true_r) in ratings)
+        recommended_relevant = sum((true_r >= threshold) for (_, true_r) in top_k)
+        
+        precision = recommended_relevant / k if k > 0 else 0
+        recall = recommended_relevant / relevant if relevant > 0 else 0
+        
+        precision_list.append(precision)
+        recall_list.append(recall)
+    
+    precision = np.mean(precision_list)
+    recall = np.mean(recall_list)
+    f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
+    
+    print("\nModel Evaluation Metrics:")
+    print(f"RMSE: {rmse:.4f}")
+    print(f"MAE: {mae:.4f}")
+    print(f"Precision: {precision:.4f}")
+    print(f"Recall: {recall:.4f}")
+    print(f"F1-Score: {f1:.4f}")
+    
+    # Save hybrid components (preserving your original structure)
+    hybrid_components = {
+        'svd_model': best_svd,
+        'content_components': content_based_components,
+        'genre_weights': (0.7, 0.3)  # Your genre/country weights
+    }
+    dump(hybrid_components, 'hybrid_model.joblib')
