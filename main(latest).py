@@ -68,15 +68,15 @@ def collaborative_recommendation(user_id, content_type=None):
 def content_based_recommendation(genre_filter=None, year_filter=None, content_type=None):
     """Generate recommendations using content-based filtering"""
     # Extract components from the content model
+    tfidf_vectorizer = content_model['tfidf_vectorizer']
+    scaler = content_model['scaler']
     content_features = content_model['content_features']
-    similarity_matrix = content_model['similarity_matrix']
     
-    # Apply initial filters
+    # Apply filters to the content features
     filtered_content = content_features.copy()
     
     if content_type and content_type != "All":
-        content_type = content_type.upper()
-        filtered_content = filtered_content[filtered_content['type'] == content_type]
+        filtered_content = filtered_content[filtered_content['type'].str.strip().str.lower() == content_type.lower()]
     
     if genre_filter:
         filtered_content = filtered_content[filtered_content['genres'].str.contains(genre_filter, case=False, na=False)]
@@ -87,57 +87,38 @@ def content_based_recommendation(genre_filter=None, year_filter=None, content_ty
     if filtered_content.empty:
         return []
     
-    # We need to use the filtered content to find most similar items using the similarity matrix
-    movie_ids = filtered_content['id'].tolist()
+    # Preprocess text features and transform using saved TF-IDF
+    filtered_content['text_features'] = (
+        filtered_content['genres'].fillna('') + " " +
+        filtered_content['production_countries'].fillna('') + " " +
+        filtered_content['description'].fillna('')
+    )
+    tfidf_matrix = tfidf_vectorizer.transform(filtered_content['text_features'])
     
-    # For the seed movies, get the top similar movies from the similarity matrix
+    # Scale numerical features (release_year)
+    numerical_features = scaler.transform(filtered_content[['release_year']])
+    numerical_features_sparse = csr_matrix(numerical_features)
+    
+    # Combine features
+    combined_features = hstack([tfidf_matrix, numerical_features_sparse])
+    
+    # Compute similarity with all content
+    similarity_matrix = cosine_similarity(combined_features, tfidf_vectorizer.transform(content_features['text_features']))
+    
+    # Get top similar items
     recommendations = []
-    movie_indices = content_features[content_features['id'].isin(movie_ids)].index.tolist()
+    for idx in range(len(filtered_content)):
+        sim_scores = list(enumerate(similarity_matrix[idx]))
+        sim_scores = sorted(sim_scores, key=lambda x: x[1], reverse=True)[1:6]  # Exclude self
+        for movie_idx, score in sim_scores:
+            movie_id = content_features.iloc[movie_idx]['id']
+            avg_rating = user_interactions[user_interactions['id'] == movie_id]['rating'].mean()
+            recommendations.append({
+                "title": content_features.iloc[movie_idx]['title'],
+                "rating": avg_rating if not pd.isna(avg_rating) else 3.0,
+                "id": movie_id
+            })
     
-    # Get all unique movie indices from the similarity matrix
-    all_indices = set(similarity_matrix.index)
-    
-    # Only proceed with indices that are actually in the similarity matrix
-    valid_indices = [idx for idx in movie_indices if idx in all_indices]
-    
-    if not valid_indices:
-        return []
-    
-    # For each valid index, get similar movies
-    all_similar_items = set()
-    for idx in valid_indices:
-        # Get top 5 similar movies for each seed movie
-        similar_indices = similarity_matrix.loc[idx].sort_values(ascending=False).index[1:6]
-        all_similar_items.update(similar_indices)
-    
-    # Remove the seed movies from recommendations
-    all_similar_items = all_similar_items - set(valid_indices)
-    
-    # Get the titles and ids for the similar movies
-    for idx in all_similar_items:
-        # Make sure the index exists in content_features
-        if idx not in content_features.index:
-            continue
-            
-        movie_id = content_features.loc[idx, 'id']
-        movie_info = titles[titles['id'] == movie_id]
-        
-        if movie_info.empty:
-            continue
-            
-        movie_title = movie_info['title'].iloc[0]
-        
-        # Get average rating if available
-        avg_rating = user_interactions[user_interactions['id'] == movie_id]['rating'].mean() \
-                     if not user_interactions[user_interactions['id'] == movie_id].empty else 3.0
-                     
-        recommendations.append({
-            "title": movie_title,
-            "rating": float(avg_rating),
-            "id": movie_id
-        })
-    
-    # Sort by rating and return top 10
     return sorted(recommendations, key=lambda x: x['rating'], reverse=True)[:10]
 
 def hybrid_recommendation(user_id, genre_filter=None, year_filter=None, content_type=None):
