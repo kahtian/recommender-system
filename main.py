@@ -82,31 +82,9 @@ try:
             content_model['content_features']['release_year'] = pd.to_numeric(
                 content_model['content_features']['release_year'], errors='coerce')
             
-            # Print types of content in the dataset for debugging
-            if 'type' in content_model['content_features'].columns:
-                st.sidebar.write("Content types:", content_model['content_features']['type'].unique().tolist())
-
-            # Add this to your debug section
-            all_genres = set()
-            for genres in titles['genres']:
-                if isinstance(genres, list):
-                    all_genres.update(genres)
-            st.sidebar.write("All genres in dataset:", sorted(all_genres))
-
-            # Check what genres exist for shows
-            show_genres = set()
-            for idx, row in titles[titles['type'].str.lower() == 'show'].iterrows():
-                if isinstance(row['genres'], list):
-                    show_genres.update(row['genres'])
-            st.sidebar.write("Genres for shows:", sorted(show_genres))
-
 except Exception as e:
     st.error(f"Error loading files: {e}")
     st.stop()
-
-# Sidebar for navigation
-st.sidebar.title("🎬 Movie Recommender")
-st.sidebar.markdown("---")
 
 # Main content
 st.title("Netflix TV Shows & Movie Recommendation System")
@@ -133,7 +111,7 @@ with st.sidebar:
         st.subheader("Content Filters")
         
         # Movie Type (single select)
-        content_type = st.radio("Movie Type", ["All", "Movie", "Show"], index=0)
+        content_type = st.radio("Movie Type", ["All", "Movie🎬", "Show 📺"], index=0)
         
         # Genre (multiselect)
         all_genres = set()
@@ -194,6 +172,9 @@ def get_movie_details(movie_id):
         'type': movie['type']
     }
 
+
+
+
 # Recommendation Functions
 def collaborative_recommendation(user_id, content_type="All"):
     """Generate recommendations using collaborative filtering model (SVD)"""
@@ -231,10 +212,8 @@ def collaborative_recommendation(user_id, content_type="All"):
     
     return sorted(predictions, key=lambda x: x['rating'], reverse=True)[:10]
 
-def content_based_recommendation(genre_filter=None, year_filter=None, content_type=None, country_filter=None, n=10):
-    """Generate recommendations using content-based filtering (with fallback to average rating)"""
-    st.sidebar.write("--- Content-Based Debug ---")
 
+def content_based_recommendation(genre_filter=None, year_filter=None, content_type=None, country_filter=None, n=10):
     content_features_full = content_model['content_features'].copy()
 
     def safe_literal_eval(x):
@@ -251,7 +230,6 @@ def content_based_recommendation(genre_filter=None, year_filter=None, content_ty
         if col in content_features_full.columns:
             try:
                 content_features_full[col] = content_features_full[col].apply(safe_literal_eval)
-                st.sidebar.write(f"Applied literal_eval to {col}.")
             except Exception as e:
                 st.sidebar.error(f"Error applying literal_eval to {col}: {e}")
                 return []
@@ -263,9 +241,7 @@ def content_based_recommendation(genre_filter=None, year_filter=None, content_ty
             content_features = content_features.dropna(subset=['type'])
             content_features['type'] = content_features['type'].str.lower()
             content_features = content_features[content_features['type'] == content_type.lower()]
-            st.sidebar.write(f"After type filter: {len(content_features)} {content_type}s")
-        else: st.sidebar.warning("'type' column not found for filtering.")
-
+            
     def match_genres(movie_genres, filter_genres):
         if not isinstance(movie_genres, list): return False
         movie_genres_lower = {str(g).lower() for g in movie_genres}
@@ -274,7 +250,6 @@ def content_based_recommendation(genre_filter=None, year_filter=None, content_ty
 
     if genre_filter:
         content_features = content_features[content_features['genres'].apply(lambda x: match_genres(x, genre_filter))]
-        st.sidebar.write(f"After genre filter: {len(content_features)} items")
 
     if year_filter:
         if 'release_year' in content_features.columns:
@@ -284,7 +259,6 @@ def content_based_recommendation(genre_filter=None, year_filter=None, content_ty
                 (content_features['release_year'] >= year_filter[0]) &
                 (content_features['release_year'] <= year_filter[1])
             ]
-            st.sidebar.write(f"After year filter: {len(content_features)} items")
         else: st.sidebar.warning("'release_year' column not found for filtering.")
 
     if country_filter:
@@ -292,76 +266,67 @@ def content_based_recommendation(genre_filter=None, year_filter=None, content_ty
             content_features = content_features[content_features['production_countries'].apply(
                 lambda x: country_filter.lower() in [c.lower() for c in x] if isinstance(x, list) else False
             )]
-            st.sidebar.write(f"After country filter: {len(content_features)} items")
         else: st.sidebar.warning("'production_countries' column not found for filtering.")
 
-    st.sidebar.write(f"After all filters: {len(content_features)} items")
+
+    recommendations = [] # Initialize recommendations list
 
     if content_features.empty:
-        st.sidebar.warning("No items match your filters!")
-        # Fallback to popular items (adjust as needed)
+        st.sidebar.warning("No items match your filters! Falling back to popular items.")
+        # Fallback to popular items
         avg_ratings = user_interactions.groupby('id')['rating'].mean().reset_index()
         fallback_content = content_features_full.merge(avg_ratings, on='id', how='left')
-        fallback_content['rating'] = fallback_content['rating'].fillna(3.0)
+        fallback_content['rating'] = fallback_content['rating'].fillna(3.0) # Use fillna on the merged series
         fallback_content = fallback_content.sort_values('rating', ascending=False).head(n)
-        recommendations = []
-        st.sidebar.write("Columns in top_filtered:", top_filtered.columns.tolist()) # Add this line
-        for _, row in top_filtered.iterrows():
-            details = get_movie_details(row['id']) # This is where the error occurs
+
+        # Corrected fallback loop
+        for _, row in fallback_content.iterrows(): # Corrected variable name
+            details = get_movie_details(row['id'])
+            # --- ADD ID HERE ---
+            details['id'] = row['id']
+            # --- END ADDITION ---
             details['rating'] = row['rating']
             recommendations.append(details)
-        st.sidebar.write(f"Returning {len(recommendations)} popular fallback items.")
-        st.sidebar.write("--- End Content-Based Debug ---")
-        return recommendations
+
     else:
-        st.sidebar.info(f"Found {len(content_features)} matching items. Recommending based on average rating.")
         # Merge with average ratings to rank the filtered items
         avg_ratings = user_interactions.groupby('id')['rating'].mean().reset_index()
         filtered_with_ratings = content_features.merge(avg_ratings, on='id', how='left')
         filtered_with_ratings['rating'] = filtered_with_ratings['rating'].fillna(3.0) # Default rating if no interaction
         top_filtered = filtered_with_ratings.sort_values('rating', ascending=False).head(n)
 
-        recommendations = []
-        for _, row in top_filtered.iterrows():
-            details = get_movie_details(row['id'])
-            details['rating'] = row['rating']
-            recommendations.append(details)
-        st.sidebar.write(f"Returning top {len(recommendations)} filtered items based on average rating.")
-        st.sidebar.write("--- End Content-Based Debug ---")
-        return recommendations
+    return recommendations # Return the list
     
+
 def hybrid_recommendation(user_id, genre_filter=None, year_filter=None, content_type=None, country_filter=None):
-    """Generate recommendations using hybrid approach (collaborative + content-based)"""
-    # Extract weights from hybrid model
-    collaborative_weight = hybrid_model['genre_weights'][0]
-    content_weight = hybrid_model['genre_weights'][1]
     
-    # Get collaborative filtering recommendations
-    collab_recs = collaborative_recommendation(user_id, content_type)
+    # Get recommendations from both models
+    collab_recs = collaborative_recommendation(user_id, content_type)[:50]  # Get more CF recs
+    content_recs = content_based_recommendation(
+        genre_filter, year_filter, content_type, country_filter, n=50
+    )  # Get more CBF recs
     
-    # Get content-based recommendations
-    content_recs = content_based_recommendation(genre_filter, year_filter, content_type, country_filter)
-    
-    # Combine recommendations with weights
+    # Create scoring dictionary
     movie_scores = {}
     
-    # Process collaborative recommendations
+    # Process collaborative recommendations (70% weight)
     for rec in collab_recs:
         movie_scores[rec['id']] = {
-            'score': rec['rating'] * collaborative_weight,
+            'score': (rec['rating'] / 5) * 0.7,  # Normalized CF score
             'cf_score': rec['rating'],
             'cbf_score': 0,
             'details': rec
         }
     
-    # Process content recommendations
+    # Process content recommendations (30% weight)
     for rec in content_recs:
+        cbf_component = (rec['rating'] / 5) * 0.3  # Normalized CBF score
         if rec['id'] in movie_scores:
-            movie_scores[rec['id']]['score'] += rec['rating'] * content_weight
+            movie_scores[rec['id']]['score'] += cbf_component
             movie_scores[rec['id']]['cbf_score'] = rec['rating']
         else:
             movie_scores[rec['id']] = {
-                'score': rec['rating'] * content_weight,
+                'score': cbf_component,
                 'cf_score': 0,
                 'cbf_score': rec['rating'],
                 'details': rec
@@ -370,14 +335,31 @@ def hybrid_recommendation(user_id, genre_filter=None, year_filter=None, content_
     # Convert to list format with all details
     hybrid_recs = []
     for movie_id, data in movie_scores.items():
-        movie_data = data['details']
-        movie_data['hybrid_score'] = data['score']
-        movie_data['cf_score'] = data['cf_score']
-        movie_data['cbf_score'] = data['cbf_score']
-        hybrid_recs.append(movie_data)
+        details = data['details'].copy()
+        details.update({
+            'hybrid_score': data['score'] * 5,  # Scale back to 0-5 range for display
+            'cf_score': data['cf_score'],
+            'cbf_score': data['cbf_score']
+        })
+        hybrid_recs.append(details)
     
-    # Sort by hybrid score and return top 10
-    return sorted(hybrid_recs, key=lambda x: x['hybrid_score'], reverse=True)[:10]
+    # Sort by hybrid score
+    hybrid_recs.sort(key=lambda x: x['hybrid_score'], reverse=True)
+    
+    # Apply some diversity to the results
+    final_recs = []
+    genres_seen = set()
+    
+    for rec in hybrid_recs:
+        rec_genres = set(g.lower() for g in rec.get('genres', []))
+        if not genres_seen.intersection(rec_genres) or len(final_recs) < 5:
+            final_recs.append(rec)
+            genres_seen.update(rec_genres)
+        if len(final_recs) >= 10:
+            break
+    
+    return final_recs[:10]
+
 
 # Display movie information
 def display_movie_card(movie, recommender_type):
@@ -476,22 +458,6 @@ if st.button("Get Recommendations"):
                 # Display all recommendations
                 for movie in recommendations:
                     display_movie_card(movie, recommender_type)
-                
-                # Show metrics
-                st.sidebar.markdown("---")
-                st.sidebar.subheader("Recommendation Metrics")
-                if recommender_type == "Hybrid":
-                    avg_hybrid = np.mean([r.get('hybrid_score', 0) for r in recommendations])
-                    avg_cf = np.mean([r.get('cf_score', 0) for r in recommendations])
-                    avg_cbf = np.mean([r.get('cbf_score', 0) for r in recommendations])
-                    
-                    col1, col2, col3 = st.sidebar.columns(3)
-                    col1.metric("Avg Hybrid", f"{avg_hybrid:.2f}")
-                    col2.metric("Avg CF", f"{avg_cf:.2f}")
-                    col3.metric("Avg CBF", f"{avg_cbf:.2f}")
-                else:
-                    avg_rating = np.mean([r.get('rating', 0) for r in recommendations])
-                    st.sidebar.metric("Average Rating", f"{avg_rating:.2f}/5.0")
                 
         except Exception as e:
             st.error(f"Error generating recommendations: {e}")
