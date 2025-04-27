@@ -111,7 +111,7 @@ with st.sidebar:
         st.subheader("Content Filters")
         
         # Movie Type (single select)
-        content_type = st.radio("Movie Type", ["All", "Movie🎬", "Show 📺"], index=0)
+        content_type = st.radio("Movie Type", ["All 💯", "Movie 🍿", "Show 📺"], index=0)
         
         # Genre (multiselect)
         all_genres = set()
@@ -214,6 +214,8 @@ def collaborative_recommendation(user_id, content_type="All"):
 
 
 def content_based_recommendation(genre_filter=None, year_filter=None, content_type=None, country_filter=None, n=10):
+    """Generate recommendations using content-based filtering (with fallback to average rating)"""
+
     content_features_full = content_model['content_features'].copy()
 
     def safe_literal_eval(x):
@@ -231,7 +233,6 @@ def content_based_recommendation(genre_filter=None, year_filter=None, content_ty
             try:
                 content_features_full[col] = content_features_full[col].apply(safe_literal_eval)
             except Exception as e:
-                st.sidebar.error(f"Error applying literal_eval to {col}: {e}")
                 return []
 
     content_features = content_features_full.copy()
@@ -241,7 +242,8 @@ def content_based_recommendation(genre_filter=None, year_filter=None, content_ty
             content_features = content_features.dropna(subset=['type'])
             content_features['type'] = content_features['type'].str.lower()
             content_features = content_features[content_features['type'] == content_type.lower()]
-            
+        else: st.sidebar.warning("'type' column not found for filtering.")
+
     def match_genres(movie_genres, filter_genres):
         if not isinstance(movie_genres, list): return False
         movie_genres_lower = {str(g).lower() for g in movie_genres}
@@ -279,21 +281,20 @@ def content_based_recommendation(genre_filter=None, year_filter=None, content_ty
         fallback_content['rating'] = fallback_content['rating'].fillna(3.0) # Use fillna on the merged series
         fallback_content = fallback_content.sort_values('rating', ascending=False).head(n)
 
-        # Corrected fallback loop
-        for _, row in fallback_content.iterrows(): # Corrected variable name
-            details = get_movie_details(row['id'])
-            # --- ADD ID HERE ---
-            details['id'] = row['id']
-            # --- END ADDITION ---
-            details['rating'] = row['rating']
-            recommendations.append(details)
-
     else:
         # Merge with average ratings to rank the filtered items
         avg_ratings = user_interactions.groupby('id')['rating'].mean().reset_index()
         filtered_with_ratings = content_features.merge(avg_ratings, on='id', how='left')
         filtered_with_ratings['rating'] = filtered_with_ratings['rating'].fillna(3.0) # Default rating if no interaction
         top_filtered = filtered_with_ratings.sort_values('rating', ascending=False).head(n)
+
+        for _, row in top_filtered.iterrows():
+            details = get_movie_details(row['id'])
+             # --- ADD ID HERE ---
+            details['id'] = row['id']
+            # --- END ADDITION ---
+            details['rating'] = row['rating']
+            recommendations.append(details)
 
     return recommendations # Return the list
     
@@ -458,6 +459,7 @@ if st.button("Get Recommendations"):
                 # Display all recommendations
                 for movie in recommendations:
                     display_movie_card(movie, recommender_type)
+                
                 
         except Exception as e:
             st.error(f"Error generating recommendations: {e}")
