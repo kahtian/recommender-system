@@ -111,7 +111,7 @@ with st.sidebar:
         st.subheader("Content Filters")
         
         # Movie Type (single select)
-        content_type = st.radio("Movie Type", ["All 💯", "Movie 🍿", "Show 📺"], index=0)
+        content_type = st.radio("Movie Type", ["All", "Movie", "Show"], index=0)
         
         # Genre (multiselect)
         all_genres = set()
@@ -280,6 +280,16 @@ def content_based_recommendation(genre_filter=None, year_filter=None, content_ty
         fallback_content = content_features_full.merge(avg_ratings, on='id', how='left')
         fallback_content['rating'] = fallback_content['rating'].fillna(3.0) # Use fillna on the merged series
         fallback_content = fallback_content.sort_values('rating', ascending=False).head(n)
+
+        # Corrected fallback loop
+        st.sidebar.write("Columns in fallback_content:", fallback_content.columns.tolist()) # Corrected variable name
+        for _, row in fallback_content.iterrows(): # Corrected variable name
+            details = get_movie_details(row['id'])
+            # --- ADD ID HERE ---
+            details['id'] = row['id']
+            # --- END ADDITION ---
+            details['rating'] = row['rating']
+            recommendations.append(details)
 
     else:
         # Merge with average ratings to rank the filtered items
