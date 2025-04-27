@@ -52,7 +52,7 @@ if missing_files:
     st.info("Please make sure all required model and data files are in the same directory as this script.")
     st.stop()
 
-# Load models and data
+# Modify your data loading section
 try:
     with st.spinner("Loading models and data..."):
         collaborative_model = load('collaborative_model.joblib')
@@ -61,10 +61,45 @@ try:
         titles = pd.read_csv('titles.xls')
         user_interactions = pd.read_csv('user_interactions.xls')
         
+        # Ensure release_year is numeric in titles dataframe
+        titles['release_year'] = pd.to_numeric(titles['release_year'], errors='coerce')
+        
         # Handle string lists in dataframe
         for col in ['genres', 'production_countries']:
             if col in titles.columns:
                 titles[col] = titles[col].apply(lambda x: literal_eval(x) if isinstance(x, str) else [])
+        
+        # Ensure content model has all required fields
+        if 'content_features' in content_model:
+            # Check if release_year exists
+            if 'release_year' not in content_model['content_features'].columns:
+                # Add release_year from titles if missing
+                st.sidebar.write("Adding release_year to content_features")
+                content_model['content_features'] = content_model['content_features'].merge(
+                    titles[['id', 'release_year']], on='id', how='left')
+            
+            # Convert release_year to numeric
+            content_model['content_features']['release_year'] = pd.to_numeric(
+                content_model['content_features']['release_year'], errors='coerce')
+            
+            # Print types of content in the dataset for debugging
+            if 'type' in content_model['content_features'].columns:
+                st.sidebar.write("Content types:", content_model['content_features']['type'].unique().tolist())
+
+            # Add this to your debug section
+            all_genres = set()
+            for genres in titles['genres']:
+                if isinstance(genres, list):
+                    all_genres.update(genres)
+            st.sidebar.write("All genres in dataset:", sorted(all_genres))
+
+            # Check what genres exist for shows
+            show_genres = set()
+            for idx, row in titles[titles['type'].str.lower() == 'show'].iterrows():
+                if isinstance(row['genres'], list):
+                    show_genres.update(row['genres'])
+            st.sidebar.write("Genres for shows:", sorted(show_genres))
+
 except Exception as e:
     st.error(f"Error loading files: {e}")
     st.stop()
@@ -85,43 +120,55 @@ recommender_type = st.sidebar.selectbox(
 
 st.sidebar.markdown("---")
 
-# User input section - MODIFIED VERSION
+# User input section
 with st.sidebar:
+    # Common inputs
     if recommender_type in ["Collaborative Filtering", "Hybrid"]:
         # Get list of unique user IDs from interactions
         unique_users = sorted(user_interactions['user_id'].unique().tolist()[:100])  # Limit to first 100 for UI performance
         user_id = st.selectbox("Select User ID", unique_users, index=0)
     
-    # Only show content filters for Content-Based and Hybrid
+    # Content filters (for Content-Based and Hybrid)
     if recommender_type in ["Content-Based", "Hybrid"]:
         st.subheader("Content Filters")
-        content_type = st.radio("Movie Type", ["All", "Movie", "Show"])
         
-        # Extract all genres and sort them
+        # Movie Type (single select)
+        content_type = st.radio("Movie Type", ["All", "Movie", "Show"], index=0)
+        
+        # Genre (multiselect)
         all_genres = set()
         for genres_list in titles['genres']:
             if isinstance(genres_list, list):
                 all_genres.update(genres_list)
         genre_options = sorted(list(all_genres))
+        selected_genres = st.multiselect("Filter by Genre", genre_options, default=None)
+        genre_filter = selected_genres if selected_genres else None
         
-        genre_filter = st.selectbox("Filter by Genre", ["All"] + genre_options)
-        if genre_filter == "All":
-            genre_filter = None
-            
+        # Release Year (range slider)
         year_range = titles['release_year'].dropna().astype(int)
         min_year, max_year = int(year_range.min()), int(year_range.max())
+        year_filter = st.slider(
+            "Release Year Range",
+            min_value=1945,
+            max_value=2022,
+            value=(1945, 2022)
+        )
         
-        use_year_filter = st.checkbox("Filter by Release Year")
-        if use_year_filter:
-            year_filter = st.slider("Select Release Year", min_year, max_year, 2015)
-        else:
-            year_filter = None
+        # Production Country (single select)
+        all_countries = set()
+        for countries_list in titles['production_countries']:
+            if isinstance(countries_list, list):
+                all_countries.update(countries_list)
+        country_options = sorted(list(all_countries))
+        country_filter = st.selectbox("Production Country", ["All"] + country_options, index=0)
+        if country_filter == "All":
+            country_filter = None
     else:
         # For Collaborative Filtering, set defaults
         content_type = "All"
         genre_filter = None
-        year_filter = None
-
+        year_filter = (1945, 2022)  # Full range
+        country_filter = None
 
 # Function to get movie details
 def get_movie_details(movie_id):
@@ -148,7 +195,7 @@ def get_movie_details(movie_id):
     }
 
 # Recommendation Functions
-def collaborative_recommendation(user_id, content_type=None):
+def collaborative_recommendation(user_id, content_type="All"):
     """Generate recommendations using collaborative filtering model (SVD)"""
     # Get user's rated movies
     user_rated_movies = user_interactions[user_interactions['user_id'] == user_id]['id'].tolist()
@@ -184,78 +231,106 @@ def collaborative_recommendation(user_id, content_type=None):
     
     return sorted(predictions, key=lambda x: x['rating'], reverse=True)[:10]
 
-def content_based_recommendation(genre_filter=None, year_filter=None, content_type=None):
-    """Generate recommendations using content-based filtering"""
-    # Extract components from the content model
-    content_features = content_model['content_features']
-    similarity_matrix = content_model['similarity_matrix']
-    
-    # Apply filters
-    filtered_content = content_features.copy()
-    
-    if content_type and content_type != "All":
-        filtered_content = filtered_content[filtered_content['type'] == content_type]
-    
-    if genre_filter:
-        # Filter by genre - this needs to handle list format
-        filtered_content = filtered_content[filtered_content['genres'].apply(
-            lambda x: genre_filter in x if isinstance(x, list) else False
-        )]
-    
-    if year_filter:
-        filtered_content = filtered_content[filtered_content['release_year'] == year_filter]
-    
-    if filtered_content.empty:
-        return []
-    
-    # Get movie indices for filtered content
-    movie_indices = filtered_content.index.tolist()
-    
-    # Get all valid indices that exist in the similarity matrix
-    valid_indices = [idx for idx in movie_indices if idx in similarity_matrix.index]
-    
-    if not valid_indices:
-        return []
-    
-    # For each seed movie, get similar movies
-    all_similar_items = set()
-    for idx in valid_indices[:5]:  # Limit to 5 seed movies for efficiency
-        similar_indices = similarity_matrix.loc[idx].sort_values(ascending=False).index[1:6]
-        all_similar_items.update(similar_indices)
-    
-    # Remove the seed movies
-    all_similar_items = all_similar_items - set(valid_indices)
-    
-    # Get complete details for recommendations
-    recommendations = []
-    for idx in all_similar_items:
-        try:
-            movie_id = content_features.loc[idx, 'id']
-            
-            # Get average rating
-            avg_rating = user_interactions[user_interactions['id'] == movie_id]['rating'].mean()
-            if np.isnan(avg_rating):
-                avg_rating = 3.0  # Default rating if no data
-                
-            # Get movie details
-            movie_details = get_movie_details(movie_id)
-            
-            recommendations.append({
-                "id": movie_id,
-                "title": movie_details['title'],
-                "release_year": movie_details['release_year'],
-                "genres": movie_details['genres'],
-                "description": movie_details['description'],
-                "production_countries": movie_details['production_countries'],
-                "type": movie_details['type'],
-                "rating": float(avg_rating)
-            })
-        except Exception as e:
-            continue
-    
-    return sorted(recommendations, key=lambda x: x['rating'], reverse=True)[:10]
+def content_based_recommendation(genre_filter=None, year_filter=None, content_type=None, country_filter=None, n=10):
+    """Generate recommendations using content-based filtering (with fallback to average rating)"""
+    st.sidebar.write("--- Content-Based Debug ---")
 
-def hybrid_recommendation(user_id, genre_filter=None, year_filter=None, content_type=None):
+    content_features_full = content_model['content_features'].copy()
+
+    def safe_literal_eval(x):
+        if isinstance(x, str):
+            try:
+                if x.strip().startswith(('[', '(')) and x.strip().endswith((']', ')')):
+                    return literal_eval(x)
+                else: return []
+            except: return []
+        elif isinstance(x, list): return x
+        else: return []
+
+    for col in ['genres', 'production_countries']:
+        if col in content_features_full.columns:
+            try:
+                content_features_full[col] = content_features_full[col].apply(safe_literal_eval)
+                st.sidebar.write(f"Applied literal_eval to {col}.")
+            except Exception as e:
+                st.sidebar.error(f"Error applying literal_eval to {col}: {e}")
+                return []
+
+    content_features = content_features_full.copy()
+
+    if content_type and content_type != "All":
+        if 'type' in content_features.columns:
+            content_features = content_features.dropna(subset=['type'])
+            content_features['type'] = content_features['type'].str.lower()
+            content_features = content_features[content_features['type'] == content_type.lower()]
+            st.sidebar.write(f"After type filter: {len(content_features)} {content_type}s")
+        else: st.sidebar.warning("'type' column not found for filtering.")
+
+    def match_genres(movie_genres, filter_genres):
+        if not isinstance(movie_genres, list): return False
+        movie_genres_lower = {str(g).lower() for g in movie_genres}
+        filter_genres_lower = {str(g).lower() for g in filter_genres}
+        return not movie_genres_lower.isdisjoint(filter_genres_lower)
+
+    if genre_filter:
+        content_features = content_features[content_features['genres'].apply(lambda x: match_genres(x, genre_filter))]
+        st.sidebar.write(f"After genre filter: {len(content_features)} items")
+
+    if year_filter:
+        if 'release_year' in content_features.columns:
+            content_features['release_year'] = pd.to_numeric(content_features['release_year'], errors='coerce')
+            content_features = content_features.dropna(subset=['release_year'])
+            content_features = content_features[
+                (content_features['release_year'] >= year_filter[0]) &
+                (content_features['release_year'] <= year_filter[1])
+            ]
+            st.sidebar.write(f"After year filter: {len(content_features)} items")
+        else: st.sidebar.warning("'release_year' column not found for filtering.")
+
+    if country_filter:
+        if 'production_countries' in content_features.columns:
+            content_features = content_features[content_features['production_countries'].apply(
+                lambda x: country_filter.lower() in [c.lower() for c in x] if isinstance(x, list) else False
+            )]
+            st.sidebar.write(f"After country filter: {len(content_features)} items")
+        else: st.sidebar.warning("'production_countries' column not found for filtering.")
+
+    st.sidebar.write(f"After all filters: {len(content_features)} items")
+
+    if content_features.empty:
+        st.sidebar.warning("No items match your filters!")
+        # Fallback to popular items (adjust as needed)
+        avg_ratings = user_interactions.groupby('id')['rating'].mean().reset_index()
+        fallback_content = content_features_full.merge(avg_ratings, on='id', how='left')
+        fallback_content['rating'] = fallback_content['rating'].fillna(3.0)
+        fallback_content = fallback_content.sort_values('rating', ascending=False).head(n)
+        recommendations = []
+        st.sidebar.write("Columns in top_filtered:", top_filtered.columns.tolist()) # Add this line
+        for _, row in top_filtered.iterrows():
+            details = get_movie_details(row['id']) # This is where the error occurs
+            details['rating'] = row['rating']
+            recommendations.append(details)
+        st.sidebar.write(f"Returning {len(recommendations)} popular fallback items.")
+        st.sidebar.write("--- End Content-Based Debug ---")
+        return recommendations
+    else:
+        st.sidebar.info(f"Found {len(content_features)} matching items. Recommending based on average rating.")
+        # Merge with average ratings to rank the filtered items
+        avg_ratings = user_interactions.groupby('id')['rating'].mean().reset_index()
+        filtered_with_ratings = content_features.merge(avg_ratings, on='id', how='left')
+        filtered_with_ratings['rating'] = filtered_with_ratings['rating'].fillna(3.0) # Default rating if no interaction
+        top_filtered = filtered_with_ratings.sort_values('rating', ascending=False).head(n)
+
+        recommendations = []
+        for _, row in top_filtered.iterrows():
+            details = get_movie_details(row['id'])
+            details['rating'] = row['rating']
+            recommendations.append(details)
+        st.sidebar.write(f"Returning top {len(recommendations)} filtered items based on average rating.")
+        st.sidebar.write("--- End Content-Based Debug ---")
+        return recommendations
+    
+def hybrid_recommendation(user_id, genre_filter=None, year_filter=None, content_type=None, country_filter=None):
     """Generate recommendations using hybrid approach (collaborative + content-based)"""
     # Extract weights from hybrid model
     collaborative_weight = hybrid_model['genre_weights'][0]
@@ -265,7 +340,7 @@ def hybrid_recommendation(user_id, genre_filter=None, year_filter=None, content_
     collab_recs = collaborative_recommendation(user_id, content_type)
     
     # Get content-based recommendations
-    content_recs = content_based_recommendation(genre_filter, year_filter, content_type)
+    content_recs = content_based_recommendation(genre_filter, year_filter, content_type, country_filter)
     
     # Combine recommendations with weights
     movie_scores = {}
@@ -356,20 +431,44 @@ if st.button("Get Recommendations"):
                 recommendations = collaborative_recommendation(user_id, content_type="All")
                 st.subheader(f"Top Netflix TV Shows & Movie for User {user_id} (Collaborative Filtering)")
             elif recommender_type == "Content-Based":
-                recommendations = content_based_recommendation(genre_filter, year_filter, content_type)
+                recommendations = content_based_recommendation(
+                    genre_filter=genre_filter,
+                    year_filter=year_filter,
+                    content_type=content_type,
+                    country_filter=country_filter
+                )
                 filters_text = []
                 if genre_filter:
-                    filters_text.append(f"Genre: {genre_filter}")
-                if year_filter:
-                    filters_text.append(f"Year: {year_filter}")
+                    filters_text.append(f"Genres: {', '.join(genre_filter)}")
+                if year_filter != (1945, 2022):
+                    filters_text.append(f"Years: {year_filter[0]}-{year_filter[1]}")
                 if content_type != "All":
                     filters_text.append(f"Type: {content_type}")
+                if country_filter:
+                    filters_text.append(f"Country: {country_filter}")
                 
                 filter_display = f" ({', '.join(filters_text)})" if filters_text else ""
                 st.subheader(f"Top Netflix TV Shows & Movie Based on Content{filter_display}")
             else:  # Hybrid
-                recommendations = hybrid_recommendation(user_id, genre_filter, year_filter, content_type)
-                st.subheader(f"Top Netflix TV Shows & Movie for User {user_id} (Hybrid Recommendations)")
+                recommendations = hybrid_recommendation(
+                    user_id=user_id,
+                    genre_filter=genre_filter,
+                    year_filter=year_filter,
+                    content_type=content_type,
+                    country_filter=country_filter
+                )
+                filters_text = []
+                if genre_filter:
+                    filters_text.append(f"Genres: {', '.join(genre_filter)}")
+                if year_filter != (1945, 2022):
+                    filters_text.append(f"Years: {year_filter[0]}-{year_filter[1]}")
+                if content_type != "All":
+                    filters_text.append(f"Type: {content_type}")
+                if country_filter:
+                    filters_text.append(f"Country: {country_filter}")
+                
+                filter_display = f" ({', '.join(filters_text)})" if filters_text else ""
+                st.subheader(f"Top Netflix TV Shows & Movie for User {user_id} (Hybrid Recommendations){filter_display}")
             
             if not recommendations:
                 st.warning("No recommendations found matching your criteria. Try adjusting your filters.")
